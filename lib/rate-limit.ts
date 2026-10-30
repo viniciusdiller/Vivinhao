@@ -1,10 +1,3 @@
-// Rate limiter simples em memória, por IP, sem dependências externas (sem
-// Redis/Upstash configurado no projeto). Limitação conhecida: em ambientes
-// serverless com múltiplas instâncias, cada instância tem seu próprio
-// contador — não é um limite globalmente exato, mas já corta bots e scripts
-// de força bruta na prática. Se o tráfego crescer, migrar pra um rate
-// limiter distribuído (ex.: @upstash/ratelimit) é o próximo passo.
-
 interface Bucket {
   count: number;
   resetAt: number;
@@ -12,8 +5,6 @@ interface Bucket {
 
 const buckets = new Map<string, Bucket>();
 
-// Evita crescimento ilimitado do Map em processos de vida longa — limpa
-// entradas expiradas periodicamente.
 const CLEANUP_INTERVAL_MS = 5 * 60_000;
 let lastCleanup = Date.now();
 
@@ -25,26 +16,41 @@ function cleanupExpired(now: number) {
   }
 }
 
-export function getClientIp(request: Request): string {
-  const forwardedFor = request.headers.get('x-forwarded-for');
-  if (forwardedFor) return forwardedFor.split(',')[0].trim();
-
-  const realIp = request.headers.get('x-real-ip');
-  if (realIp) return realIp.trim();
-
-  return 'unknown';
+export function resetRateLimitStore() {
+  buckets.clear();
 }
 
-/**
- * Retorna `true` se a requisição estiver dentro do limite permitido, `false`
- * se deve ser rejeitada com 429. `scope` isola contadores entre rotas
- * diferentes (ex.: "login" vs "login-email") pro mesmo identificador.
- */
+export function resetRateLimit(identifier: string, scope: string) {
+  const key = `${scope}:${identifier}`;
+  buckets.delete(key);
+}
+
+export function getClientIp(request: Request): string {
+  const forwardedFor = request.headers.get("x-forwarded-for");
+  if (forwardedFor) return forwardedFor.split(",")[0].trim();
+
+  const realIp = request.headers.get("x-real-ip");
+  if (realIp) return realIp.trim();
+
+  const cfConnectingIp = request.headers.get("cf-connecting-ip");
+  if (cfConnectingIp) return cfConnectingIp.trim();
+
+  return "unknown";
+}
+
+export interface RateLimitResult {
+  allowed: boolean;
+  retryAfterSeconds: number;
+  limit: number;
+  remaining: number;
+  resetAt: number;
+}
+
 export function checkRateLimit(
   identifier: string,
   scope: string,
   { limit, windowMs }: { limit: number; windowMs: number },
-): { allowed: boolean; retryAfterSeconds: number } {
+): RateLimitResult {
   const now = Date.now();
   cleanupExpired(now);
 
@@ -52,27 +58,69 @@ export function checkRateLimit(
   const bucket = buckets.get(key);
 
   if (!bucket || bucket.resetAt <= now) {
-    buckets.set(key, { count: 1, resetAt: now + windowMs });
-    return { allowed: true, retryAfterSeconds: 0 };
+    const resetAt = now + windowMs;
+    if (buckets.size >= 10000 && !bucket) {
+      for (const [expiredKey, value] of Array.from(buckets.entries())) if (value.resetAt <= now) buckets.delete(expiredKey);
+      if (buckets.size >= 10000) return { allowed: false, retryAfterSeconds: 60, limit, remaining: 0, resetAt: now + 60000 };
+    }
+    buckets.set(key, { count: 1, resetAt });
+    return {
+      allowed: true,
+      retryAfterSeconds: 0,
+      limit,
+      remaining: Math.max(0, limit - 1),
+      resetAt,
+    };
   }
 
   if (bucket.count >= limit) {
-    return { allowed: false, retryAfterSeconds: Math.ceil((bucket.resetAt - now) / 1000) };
+    const retryAfterSeconds = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+    return {
+      allowed: false,
+      retryAfterSeconds,
+      limit,
+      remaining: 0,
+      resetAt: bucket.resetAt,
+    };
   }
 
   bucket.count += 1;
-  return { allowed: true, retryAfterSeconds: 0 };
+  return {
+    allowed: true,
+    retryAfterSeconds: 0,
+    limit,
+    remaining: Math.max(0, limit - bucket.count),
+    resetAt: bucket.resetAt,
+  };
 }
 
-export function rateLimitResponse(retryAfterSeconds: number) {
+export function rateLimitResponse(
+  input: number | RateLimitResult,
+  customMessage?: string,
+) {
+  const retryAfterSeconds = typeof input === "number" ? input : input.retryAfterSeconds;
+  const message = customMessage ?? "Muitas tentativas. Aguarde um momento e tente novamente.";
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Retry-After": String(retryAfterSeconds),
+  };
+
+  if (typeof input === "object") {
+    headers["X-RateLimit-Limit"] = String(input.limit);
+    headers["X-RateLimit-Remaining"] = String(input.remaining);
+    headers["X-RateLimit-Reset"] = String(Math.ceil(input.resetAt / 1000));
+  }
+
   return new Response(
-    JSON.stringify({ message: 'Muitas tentativas. Aguarde um momento e tente novamente.' }),
+    JSON.stringify({
+      error: message,
+      message,
+      retryAfterSeconds,
+    }),
     {
       status: 429,
-      headers: {
-        'Content-Type': 'application/json',
-        'Retry-After': String(retryAfterSeconds),
-      },
+      headers,
     },
   );
 }

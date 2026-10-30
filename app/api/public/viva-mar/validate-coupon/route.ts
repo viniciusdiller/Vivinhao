@@ -1,9 +1,12 @@
+import { checkRateLimit, getClientIp, rateLimitResponse } from '@/lib/rate-limit';
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { resolvePublicTenantId } from "@/lib/public-tenant";
 import { isCouponValidForCheckIn } from "@/lib/coupon-policies";
 
 export async function POST(request: Request) {
+  const limit = checkRateLimit(getClientIp(request), 'public-coupons', { limit: 60, windowMs: 60_000 });
+  if (!limit.allowed) return rateLimitResponse(limit);
   try {
     const body = await request.json();
     const { code, checkIn } = body;

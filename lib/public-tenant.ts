@@ -5,16 +5,9 @@ import { getDb } from '@/lib/db';
 // 2+ pousadas, novas integrações devem sempre passar `?slug=` (rotas
 // públicas) ou um tenantId explícito (login).
 export async function resolveDefaultTenantId(): Promise<number | null> {
-  const { Room } = await getDb();
-  const firstRoom = await Room.findOne({
-    attributes: ['tenantId'],
-    order: [
-      ['tenantId', 'ASC'],
-      ['id', 'ASC'],
-    ],
-  });
-
-  return firstRoom?.tenantId ?? null;
+  const { Tenant } = await getDb();
+  const tenants = await Tenant.findAll({ where: { status: 'active' }, attributes: ['id'], limit: 2 });
+  return tenants.length === 1 ? tenants[0].id : null;
 }
 
 /**
@@ -29,24 +22,27 @@ export async function resolveDefaultTenantId(): Promise<number | null> {
 export async function resolvePublicTenantId(request: Request): Promise<number | null> {
   const { searchParams } = new URL(request.url);
   const fromSlug = searchParams.get('slug');
+  const { Tenant } = await getDb();
 
   if (fromSlug) {
-    const { Tenant } = await getDb();
     const tenant = await Tenant.findOne({ where: { slug: fromSlug, status: 'active' } });
     return tenant?.id ?? null;
   }
 
   const fromQuery = searchParams.get('tenantId');
   const fromEnv = process.env.PUBLIC_ROOMS_TENANT_ID;
+  if (fromQuery && !/^[1-9]\d*$/.test(fromQuery)) return null;
 
   const parsedQuery = fromQuery ? Number(fromQuery) : NaN;
   if (Number.isInteger(parsedQuery) && parsedQuery > 0) {
-    return parsedQuery;
+    const tenant = await Tenant.findOne({ where: { id: parsedQuery, status: 'active' } });
+    return tenant?.id ?? null;
   }
 
   const parsedEnv = fromEnv ? Number(fromEnv) : NaN;
   if (Number.isInteger(parsedEnv) && parsedEnv > 0) {
-    return parsedEnv;
+    const tenant = await Tenant.findOne({ where: { id: parsedEnv, status: 'active' } });
+    return tenant?.id ?? null;
   }
 
   return resolveDefaultTenantId();

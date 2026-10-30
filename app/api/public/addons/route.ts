@@ -1,3 +1,4 @@
+import { checkRateLimit, getClientIp, rateLimitResponse } from '@/lib/rate-limit';
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { resolvePublicTenantId } from "@/lib/public-tenant";
@@ -12,6 +13,8 @@ const corsHeaders = {
 // GET: lista os pacotes/adicionais ativos do tenant, para a landing page
 // pública montar a tela de "Pacotes & Adicionais" na reserva.
 export async function GET(request: Request) {
+  const limit = checkRateLimit(getClientIp(request), 'public-addons', { limit: 60, windowMs: 60_000 });
+  if (!limit.allowed) return rateLimitResponse(limit);
   try {
     const tenantId = await resolvePublicTenantId(request);
 

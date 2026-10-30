@@ -1,3 +1,4 @@
+import { checkRateLimit, rateLimitResponse } from '@/lib/rate-limit';
 import { randomUUID } from "crypto";
 import { mkdir, writeFile } from "fs/promises";
 import path from "path";
@@ -44,6 +45,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Sem permissão para esta ação." }, { status: 403 });
     }
 
+    const limit = checkRateLimit(`${session.tenantId}:${session.userId}`, 'upload', { limit: 20, windowMs: 300_000 });
+    if (!limit.allowed) return rateLimitResponse(limit);
     const formData = await request.formData();
     const filesFromPhotos = formData.getAll("photos");
     const singlePhoto = formData.get("photo");

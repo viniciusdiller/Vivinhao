@@ -86,7 +86,7 @@ export async function DELETE(
     const photoUrl = photo.url;
     await photo.destroy();
 
-    if (photoUrl.startsWith("/uploads/gallery/")) {
+    if (photoUrl.startsWith(`/uploads/gallery/${session.tenantId}/`) && !photoUrl.includes("..")) {
       const filepath = path.join(process.cwd(), "public", photoUrl);
       try {
         await unlink(filepath);
