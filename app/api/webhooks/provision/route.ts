@@ -1,3 +1,4 @@
+import { checkRateLimit, getClientIp, rateLimitResponse } from '@/lib/rate-limit';
 import bcrypt from 'bcryptjs';
 import { timingSafeEqual } from 'crypto';
 import { NextResponse } from 'next/server';
@@ -38,7 +39,11 @@ function isValidWebhookSecret(provided: string | undefined) {
 }
 
 export async function POST(request: Request) {
-  const payload = (await request.json()) as ProvisionPayload;
+  const limit = checkRateLimit(getClientIp(request), 'admin-webhook', { limit: 15, windowMs: 300_000 });
+  if (!limit.allowed) return rateLimitResponse(limit);
+
+  const payload = await request.json().catch(() => null) as ProvisionPayload | null;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || (payload.webhookSecret !== undefined && typeof payload.webhookSecret !== 'string')) return NextResponse.json({ message: 'Payload inválido.' }, { status: 400 });
 
   if (!isValidWebhookSecret(payload.webhookSecret)) {
     return NextResponse.json({ message: 'Webhook inválido.' }, { status: 401 });

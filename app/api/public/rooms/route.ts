@@ -1,3 +1,4 @@
+import { checkRateLimit, getClientIp, rateLimitResponse } from '@/lib/rate-limit';
 import { NextResponse } from "next/server";
 import { getAvailableRooms } from "@/services/tenantService";
 import { resolvePublicTenantId } from "@/lib/public-tenant";
@@ -15,6 +16,8 @@ function removeInternalRoomFields(room: Record<string, unknown>) {
 }
 
 export async function GET(request: Request) {
+  const limit = checkRateLimit(getClientIp(request), 'public-rooms', { limit: 60, windowMs: 60_000 });
+  if (!limit.allowed) return rateLimitResponse(limit);
   try {
     const { searchParams } = new URL(request.url);
     const checkIn = searchParams.get("checkIn");

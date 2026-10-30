@@ -1,3 +1,4 @@
+import { checkRateLimit, rateLimitResponse } from '@/lib/rate-limit';
 import { randomUUID } from "crypto";
 import { mkdir, writeFile } from "fs/promises";
 import path from "path";
@@ -54,6 +55,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Sem permissão para esta ação." }, { status: 403 });
     }
 
+    const limit = checkRateLimit(`${session.tenantId}:${session.userId}`, 'upload', { limit: 20, windowMs: 300_000 });
+    if (!limit.allowed) return rateLimitResponse(limit);
     const formData = await request.formData();
     const rawRoomName = String(formData.get("roomName") ?? "").trim();
 
@@ -83,7 +86,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const uploadDir = path.join(getUploadsDirectory(), roomFolderName);
+    const uploadDir = path.join(getUploadsDirectory(), String(session.tenantId), roomFolderName);
     await mkdir(uploadDir, { recursive: true });
 
     const urls: string[] = [];
@@ -126,7 +129,7 @@ export async function POST(request: Request) {
 
       await writeFile(filepath, compressedBuffer);
 
-      urls.push(`/uploads/rooms/${roomFolderName}/${filename}`);
+      urls.push(`/uploads/rooms/${session.tenantId}/${roomFolderName}/${filename}`);
     }
 
     return NextResponse.json({ urls }, { status: 201 });

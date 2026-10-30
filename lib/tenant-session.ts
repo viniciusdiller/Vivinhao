@@ -36,6 +36,10 @@ export async function getVerifiedTenantSession(): Promise<VerifiedTenantSession 
   // não existe na tabela users; seu payload é fixo e não tem estado
   // (permissões/ativação) que possa ficar obsoleto.
   if (session.userId < 0) {
+    if (session.userId !== -1 || session.role !== 'admin' || !process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD) return null;
+    const { Tenant } = await getDb();
+    const tenant = await Tenant.findOne({ where: { id: session.tenantId, status: 'active' } });
+    if (!tenant) return null;
     return {
       userId: session.userId,
       tenantId: session.tenantId,
@@ -48,7 +52,7 @@ export async function getVerifiedTenantSession(): Promise<VerifiedTenantSession 
 
   const { User, Tenant } = await getDb();
   const user = await User.findOne({
-    where: { id: session.userId },
+    where: { id: session.userId, tenantId: session.tenantId },
     include: [{ model: Tenant, as: 'tenant' }],
   });
 

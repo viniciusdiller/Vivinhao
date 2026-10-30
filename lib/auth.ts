@@ -95,7 +95,10 @@ export async function createSessionToken(payload: Omit<SessionPayload, 'exp'>): 
 
 export async function verifySessionToken(token: string): Promise<SessionPayload | null> {
   try {
+    if (token.split('.').length !== 3) return null;
     const [header, body, signature] = token.split('.');
+    const decodedHeader = JSON.parse(base64UrlDecodeText(header));
+    if (decodedHeader.alg !== 'HS256' || decodedHeader.typ !== 'JWT') return null;
     if (!header || !body || !signature) {
       return null;
     }

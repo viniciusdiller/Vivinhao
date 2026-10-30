@@ -1,3 +1,4 @@
+import { randomBytes, timingSafeEqual } from 'crypto';
 import bcrypt from 'bcryptjs';
 import { NextResponse } from 'next/server';
 import { createSessionToken, authConfig, shouldUseSecureCookies } from '@/lib/auth';
@@ -5,6 +6,8 @@ import { resolveDashboardPermissionsForRole, sanitizeDashboardPermissions } from
 import { getDb } from '@/lib/db';
 import { checkRateLimit, getClientIp, rateLimitResponse } from '@/lib/rate-limit';
 import { resolveDefaultTenantId } from '@/lib/public-tenant';
+
+const DUMMY_HASH = bcrypt.hashSync(randomBytes(32).toString('hex'), 10);
 
 function parseDashboardPermissions(raw: string | null | undefined) {
   if (!raw) {
@@ -23,14 +26,17 @@ export async function POST(request: Request) {
   // Limita por IP (contra scanners/bots) e por e-mail (contra um atacante
   // que distribua tentativas entre vários IPs mirando uma única conta).
   const ipLimit = checkRateLimit(getClientIp(request), 'login-ip', {
-    limit: 20,
-    windowMs: 60_000,
+    limit: 15,
+    windowMs: 300_000,
   });
   if (!ipLimit.allowed) {
-    return rateLimitResponse(ipLimit.retryAfterSeconds);
+    return rateLimitResponse(ipLimit);
   }
 
-  const body = (await request.json()) as { email?: string; password?: string };
+  const body = await request.json().catch(() => null);
+  if (!body || typeof body.email !== 'string' || typeof body.password !== 'string' || body.email.length > 160 || body.password.length > 256) {
+    return NextResponse.json({ message: 'Informe e-mail e senha válidos.' }, { status: 400 });
+  }
   const secureCookie = shouldUseSecureCookies(request);
 
   if (!body.email || !body.password) {
@@ -38,11 +44,11 @@ export async function POST(request: Request) {
   }
 
   const emailLimit = checkRateLimit(body.email.trim().toLowerCase(), 'login-email', {
-    limit: 8,
-    windowMs: 60_000,
+    limit: 5,
+    windowMs: 300_000,
   });
   if (!emailLimit.allowed) {
-    return rateLimitResponse(emailLimit.retryAfterSeconds);
+    return rateLimitResponse(emailLimit);
   }
 
 
@@ -53,11 +59,25 @@ export async function POST(request: Request) {
   const adminEmail = process.env.ADMIN_EMAIL;
   const adminPassword = process.env.ADMIN_PASSWORD;
 
-  if (adminEmail && adminPassword && body.email === adminEmail && body.password === adminPassword) {
+  if (adminEmail && adminPassword && body.email.trim().toLowerCase() === adminEmail.trim().toLowerCase()) {
+    let isMasterPasswordValid = false;
+
+    if (adminPassword.startsWith("$2a$") || adminPassword.startsWith("$2b$")) {
+      isMasterPasswordValid = await bcrypt.compare(body.password, adminPassword);
+    } else {
+      await bcrypt.compare(body.password, DUMMY_HASH);
+      const expectedBuf = Buffer.from(adminPassword);
+      const providedBuf = Buffer.from(body.password);
+      isMasterPasswordValid = expectedBuf.length === providedBuf.length && timingSafeEqual(expectedBuf, providedBuf);
+    }
+
+    if (!isMasterPasswordValid) {
+      return NextResponse.json({ message: 'Credenciais inválidas.' }, { status: 401 });
+    }
+
     // ADMIN_TENANT_ID é opcional: sem ele, resolve automaticamente o tenant
-    // (hoje só existe a Pousada Viva Mar) em vez de cair num id fixo — um
-    // valor hardcoded aqui já deixou esse login apontando pro tenant errado
-    // (id 1, sem quartos/galeria) enquanto o tenant real tinha outro id.
+    // ativo da pousada em vez de cair num id fixo — evita apontar para
+    // um id inexistente se a base tiver outro id inicial.
     const envTenantId = Number(process.env.ADMIN_TENANT_ID);
     const tenantId = Number.isInteger(envTenantId) && envTenantId > 0
       ? envTenantId
@@ -71,7 +91,8 @@ export async function POST(request: Request) {
     }
 
     const { Tenant } = await getDb();
-    const tenant = await Tenant.findByPk(tenantId);
+    const tenant = await Tenant.findOne({ where: { id: tenantId, status: 'active' } });
+    if (!tenant) return NextResponse.json({ message: 'Credenciais inválidas.' }, { status: 401 });
 
     const token = await createSessionToken({
       // Sessão de administrador definida por env, sem registro na tabela
@@ -105,17 +126,16 @@ export async function POST(request: Request) {
   });
 
   if (!user) {
+    await bcrypt.compare(body.password, DUMMY_HASH);
     return NextResponse.json({ message: 'Credenciais inválidas.' }, { status: 401 });
   }
 
   const tenant = user.get('tenant') as InstanceType<typeof Tenant> | undefined;
 
-  if (!tenant || tenant.status !== 'active') {
-    return NextResponse.json({ message: 'Conta inativa ou inexistente.' }, { status: 403 });
-  }
-
-  if (user.employmentStatus === 'inactive') {
-    return NextResponse.json({ message: 'Colaborador inativo. Solicite reativacao ao gestor.' }, { status: 403 });
+  // Não vazar se a conta ou colaborador está inativo — resposta e timing idênticos
+  if (!tenant || tenant.status !== 'active' || user.employmentStatus === 'inactive') {
+    await bcrypt.compare(body.password, user.passwordHash || DUMMY_HASH);
+    return NextResponse.json({ message: 'Credenciais inválidas.' }, { status: 401 });
   }
 
   const isValid = await bcrypt.compare(body.password, user.passwordHash);
